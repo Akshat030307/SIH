@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.venv*/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+
+# SIGSCOPE datasets and model artefacts (see CLAUDE.md §2)
+# raw dataset drop (RML2016.10a_dict.dat, ~640 MB) -- keep local
+archive/
+# converted RadioML cache (iq.npy, labels.parquet, plots/)
+data/radioml/
+# composed test scenes
+data/scenes/
+*.pt

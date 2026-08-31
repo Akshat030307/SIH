@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sigscope"
+version = "0.1.0"
+description = "Automated analysis of .IQ and .wav radio captures with signal parameter extraction (SIH26147 / NTRO)."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+
+# Exact dependency set from CLAUDE.md §2 -- do not substitute.
+# numpy / scipy  -> all DSP
+# soundfile      -> wav I/O
+# sigmf          -> SigMF read/write
+# scikit-learn   -> feature classifier, scaler, metrics
+# torch          -> the CNN (CPU-capable build is sufficient; no GPU on the demo laptop)
+# fastapi        -> local API
+# uvicorn        -> ASGI server for `sigscope serve`
+# pandas/pyarrow -> the RadioML labels.parquet cache mandated by §6.1
+dependencies = [
+    "numpy",
+    "scipy",
+    "soundfile",
+    "sigmf",
+    "scikit-learn",
+    "torch",
+    "fastapi",
+    "uvicorn",
+    "pandas",
+    "pyarrow",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "matplotlib",  # scripts/plot_classes.py only -- not used by the package
+]
+
+[project.scripts]
+sigscope = "sigscope.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sigscope"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "NPY"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["sigscope"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
