@@ -30,7 +30,18 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-__all__ = ["JobState", "Job", "JobStore", "STAGE_PROGRESS"]
+__all__ = ["JobState", "Job", "JobStore", "JobError", "STAGE_PROGRESS"]
+
+
+class JobError(Exception):
+    """A failure whose message is already written for an analyst.
+
+    The store prefixes an unexpected exception with its class name, which is the right
+    thing for a genuine bug. An unreadable capture is not a bug -- ``sigscope.io`` already
+    phrases those as "text.iq: does not look like raw interleaved IQ ... convert it first"
+    -- and prefixing that with ``ValueError:`` only adds noise to the one line the analyst
+    actually reads.
+    """
 
 
 class JobState(StrEnum):
@@ -162,6 +173,11 @@ class JobStore:
                     job.state = JobState.DONE
                     job.progress = 1.0
                     job.stage = "done"
+                except JobError as exc:
+                    job.state = JobState.FAILED
+                    job.error = str(exc)
+                    job.stage = "failed"
+                    job.result = {"traceback": traceback.format_exc()}
                 except Exception as exc:  # noqa: BLE001 -- a failed job is data, not a crash
                     job.state = JobState.FAILED
                     job.error = f"{type(exc).__name__}: {exc}"

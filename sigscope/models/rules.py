@@ -27,6 +27,7 @@ with the §4.11 normalisation can never fire for any real cyclic-prefix fraction
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -85,6 +86,7 @@ def apply_rules(
     fs_raw: float | None = None,
     box_f_lo: float | None = None,
     box_f_hi: float | None = None,
+    chirp: Any = None,
     cfg: EstimatorConfig | None = None,
     rules: RuleConfig | None = None,
 ) -> RuleHit | None:
@@ -92,7 +94,10 @@ def apply_rules(
 
     ``y`` is the isolated burst at ``fs_b``. ``raw_slice`` / ``fs_raw`` are the *un-isolated*
     time slice, needed only by the chirp rule -- isolation lowpasses to the detection box
-    and would filter away the very sweep the rule looks for (§4.12).
+    and would filter away the very sweep the rule looks for (§4.12). Pass ``chirp`` when
+    the caller has already run :func:`~sigscope.dsp.estimators.estimate_chirp`; the
+    pipeline does, and computing it twice per detection cost a spectrogram of the whole
+    burst each time.
 
     Order matters. Noise is tested first: on a burst that is mostly noise the other tests
     are measuring nothing, and a spurious "cw" or "AM-SSB" on an empty channel would
@@ -149,11 +154,9 @@ def apply_rules(
         )
 
     # ---- chirp: linear ridge fit R^2 > 0.9 and a large sweep ----
-    if raw_slice is not None and fs_raw:
-        chirp = estimate_chirp(
-            raw_slice, fs_raw, f_lo=box_f_lo, f_hi=box_f_hi, cfg=cfg
-        )
-        if chirp.is_chirp and chirp.chirp_rate_hz_per_s.value is not None:
+    if chirp is None and raw_slice is not None and fs_raw:
+        chirp = estimate_chirp(raw_slice, fs_raw, f_lo=box_f_lo, f_hi=box_f_hi, cfg=cfg)
+    if chirp is not None and chirp.is_chirp and chirp.chirp_rate_hz_per_s.value is not None:
             return RuleHit(
                 label="chirp-lfm",
                 confidence=RULE_CONFIDENCE,

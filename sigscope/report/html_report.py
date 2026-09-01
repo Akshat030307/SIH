@@ -58,7 +58,8 @@ def format_hz(value: float | None, *, normalised: bool = False, digits: int = 3)
     if value is None:
         return "—"
     if normalised:
-        return f"{value:+.6g} x fs"
+        # a normalised value is a small fraction; significant figures, not fixed decimals
+        return f"{value:+.5g} × fs"
     magnitude = abs(value)
     if magnitude >= 1e9:
         return f"{value / 1e9:.{digits}f} GHz"
@@ -69,9 +70,17 @@ def format_hz(value: float | None, *, normalised: bool = False, digits: int = 3)
     return f"{value:.1f} Hz"
 
 
-def _format_seconds(value: float | None) -> str:
+def _format_seconds(value: float | None, *, normalised: bool = False) -> str:
+    """Seconds, or a sample count when the capture has no known sample rate.
+
+    With ``fs`` unknown the pipeline works at ``fs = 1.0``, so every "second" is really a
+    sample index. §3 forbids printing a fabricated Hz value; printing a fabricated second
+    is the same mistake with a different unit.
+    """
     if value is None:
         return "—"
+    if normalised:
+        return f"{value:,.0f} samples"
     if value < 1e-3:
         return f"{value * 1e6:.1f} us"
     if value < 1.0:
@@ -87,10 +96,17 @@ def _format_db(value: float | str | None) -> str:
     return f"{value:.1f} dB"
 
 
-def _format_rate(detection: Detection) -> str:
+def _format_rate(detection: Detection, *, normalised: bool = False) -> str:
+    """Baud, or symbols per sample when the sample rate is unknown.
+
+    "Bd" is symbols per *second*. With ``fs`` unknown there are no seconds to divide by,
+    so quoting a baud figure would invent one.
+    """
     estimate = detection.symbol_rate_hz
     if estimate is None or estimate.value is None:
         return "—"
+    if normalised:
+        return f"{estimate.value:.5g} × fs"
     return f"{estimate.value:,.0f} Bd"
 
 
@@ -242,7 +258,7 @@ def _capture_panel(report: Report) -> str:
             "unknown" if capture.center_freq is None else format_hz(capture.center_freq),
         ),
         ("Centre from", _esc(capture.center_freq_source or "—")),
-        ("Duration", _format_seconds(capture.duration_s)),
+        ("Duration", _format_seconds(capture.duration_s, normalised=normalised)),
         ("Sample format", f"{_esc(capture.dtype_guessed)} ({capture.dtype_confidence:.0%})"),
         ("Noise floor", _format_db(report.noise_floor_dbfs) + "FS"),
         ("Detections", str(len(report.detections))),
@@ -305,14 +321,14 @@ def _detections_panel(report: Report) -> str:
         body.append(
             "<tr>"
             f'<td class="num id">{d.id}</td>'
-            f'<td class="num">{_format_seconds(d.time_start_s)}</td>'
-            f'<td class="num">{_format_seconds(d.duration_s)}</td>'
+            f'<td class="num">{_format_seconds(d.time_start_s, normalised=normalised)}</td>'
+            f'<td class="num">{_format_seconds(d.duration_s, normalised=normalised)}</td>'
             f'<td class="num">{centre}</td>'
             f'<td class="num">{format_hz(d.center_freq_offset_hz, normalised=normalised)}</td>'
             f'<td class="num">{format_hz(d.bandwidth_hz.occupied_99, normalised=normalised)}</td>'
             f'<td class="num">{_format_db(d.snr_db)}</td>'
             f'<td class="num">{_format_db(d.power_dbfs)}</td>'
-            f'<td class="num">{_format_rate(d)}</td>'
+            f'<td class="num">{_format_rate(d, normalised=normalised)}</td>'
             f'<td><span class="label">{_esc(modulation)}</span></td>'
             "</tr>"
         )

@@ -22,9 +22,12 @@ Two conventions worth stating once, because every number downstream depends on t
   ``CaptureMeta.frequencies_are_normalised`` is set and every "Hz" is a fraction of the
   sample rate, which the report says out loud.
 
-Whole-file analysis only: §2 Stage 2's overlapped block processing for multi-gigabyte
-captures is Phase 8 hardening, and a capture large enough to need it gets a warning rather
-than silent truncation.
+Captures larger than :data:`STREAM_THRESHOLD_SAMPLES` are analysed in overlapping segments
+(§2 Stage 2) so peak memory is bounded by the segment size rather than the file size. §9 B
+requires a 2 GB file to be processed "in blocks with peak RSS under 2 GB", and the
+whole-file path cannot do that: measured on a 160 MB capture it peaks at 2.4 GB, about
+fifteen times the file, because the spectrogram, its morphology masks and the connected
+component labels all scale with the sample count.
 """
 
 from __future__ import annotations
@@ -72,12 +75,50 @@ from sigscope.types import (
     Report,
 )
 
-__all__ = ["AnalysisConfig", "Analysis", "analyse_file", "analyse_iq", "file_info"]
+__all__ = [
+    "AnalysisConfig",
+    "Analysis",
+    "analyse_file",
+    "analyse_iq",
+    "analyse_streaming",
+    "file_info",
+    "SEGMENT_SAMPLES",
+    "STREAM_THRESHOLD_SAMPLES",
+]
+
+
+def _estimate_sample_count(path: Path) -> int | None:
+    """Complex sample count from the file header or size, without reading the samples.
+
+    Used to choose the whole-file or the streaming path *before* any allocation. Returns
+    None when the format cannot be sized cheaply, in which case the caller takes the
+    whole-file path and the ordinary size warning applies.
+    """
+    try:
+        if path.suffix.lower() in (".wav", ".wave"):
+            import soundfile as sf
+
+            info = sf.info(path)
+            return int(info.frames)
+        size = path.stat().st_size
+        # unknown dtype at this point; int16 interleaved IQ is the common case and the
+        # most conservative of the three (float32 would give half this count)
+        return int(size // 4)
+    except Exception:  # noqa: BLE001 -- sizing is best-effort; fall back to whole-file
+        return None
 
 UNCLASSIFIED = "unclassified"
 
-# a capture bigger than this is analysed whole anyway, but warned about (§2 Stage 2)
-LARGE_CAPTURE_SAMPLES = 1 << 26  # 64 M samples = 512 MB as complex64
+# Above this, switch to segmented streaming (§2 Stage 2, §9 B).
+STREAM_THRESHOLD_SAMPLES = 1 << 25  # 33.5 M samples ~ 268 MB as complex64
+
+# §2 Stage 2 says "overlapping blocks of 2^20 samples with 25% overlap". 2^20 samples is
+# half a second at 2 MHz -- long enough to condition, far too short to *measure*: a symbol
+# rate needs a burst, and an 0.8 s transmission would be chopped into two unmeasurable
+# halves. The overlap fraction is §2's; the segment is larger so each one can carry a real
+# analysis, and seams are stitched afterwards by _merge_across_seams.
+SEGMENT_SAMPLES = 1 << 23  # 8.4 M samples ~ 67 MB as complex64
+SEGMENT_OVERLAP = 0.25
 
 
 @dataclass
@@ -90,6 +131,10 @@ class AnalysisConfig:
     max_detections: int = 200
     # Stage 5 -- Classify. Set False to run measurement only.
     classify: bool = True
+    # A report with thousands of warning lines is unreadable, and a long streamed capture
+    # produces per-detection warnings from every segment. Beyond this the tail is folded
+    # into a count so nothing is hidden but the list stays usable.
+    max_warnings: int = 40
 
 
 @dataclass
@@ -253,6 +298,28 @@ def _unmeasurable(
     )
 
 
+def _burst_spectrogram(
+    spec: Spectrogram, burst: Burst, cfg: AnalysisConfig
+) -> Spectrogram | None:
+    """A column-sliced view of the capture spectrogram covering ``burst``, or ``None``.
+
+    Returns ``None`` when the capture spectrogram is too coarse in time for this burst, in
+    which case the caller computes a dedicated one at finer resolution.
+    """
+    cols = np.flatnonzero((spec.t >= burst.t0) & (spec.t <= burst.t1))
+    if cols.size < max(cfg.estimators.chirp_min_cols * 3, 24):
+        return None
+    lo, hi = int(cols[0]), int(cols[-1]) + 1
+    return Spectrogram(
+        f=spec.f,
+        t=spec.t[lo:hi],
+        S_db=spec.S_db[:, lo:hi],
+        fs=spec.fs,
+        nfft=spec.nfft,
+        hop=spec.hop,
+    )
+
+
 def _measure_burst(
     burst: Burst,
     index: int,
@@ -338,9 +405,19 @@ def _measure_burst(
         extra["cp_autocorr_ratio"] = _finite(ofdm.peak_ratio)
 
     # §4.12 chirp -- on the raw time slice; isolation would filter the sweep away
-    chirp = estimate_chirp(
-        x[iso.n0 : iso.n1], fs, f_lo=burst.f_lo, f_hi=burst.f_hi, cfg=cfg.estimators
-    )
+    # Reuse the capture's own spectrogram where it already covers this burst with enough
+    # columns to fit a ridge. Recomputing one per detection cost a full STFT of the burst
+    # slice each time -- 17 extra STFTs, five seconds, on a 17-detection scene.
+    chirp_spec = _burst_spectrogram(spec, burst, cfg)
+    if chirp_spec is not None:
+        chirp = estimate_chirp(
+            x[iso.n0 : iso.n1], fs, f_lo=burst.f_lo, f_hi=burst.f_hi,
+            cfg=cfg.estimators, spec=chirp_spec,
+        )
+    else:
+        chirp = estimate_chirp(
+            x[iso.n0 : iso.n1], fs, f_lo=burst.f_lo, f_hi=burst.f_hi, cfg=cfg.estimators
+        )
     if chirp.is_chirp:
         extra["chirp_rate_hz_per_s"] = _finite(chirp.chirp_rate_hz_per_s.value)
         extra["chirp_sweep_bandwidth_hz"] = _finite(chirp.sweep_bandwidth_hz.value)
@@ -400,6 +477,7 @@ def _measure_burst(
             fs_raw=fs,
             box_f_lo=burst.f_lo,
             box_f_hi=burst.f_hi,
+            chirp=chirp,
             extra=extra,
             symbol_rate=symbol_rate,
             bandwidth_hz=bandwidth.bandwidth.occupied_99,
@@ -480,17 +558,19 @@ def analyse_iq(
     if meta.frequencies_are_normalised:
         warnings.append(
             "sample rate is unknown; every frequency below is a fraction of the sample "
-            "rate, not Hz"
+            "rate, not Hz, and every time is a sample count, not seconds. §3 forbids "
+            "printing a fabricated Hz value, and the same applies to a fabricated second."
         )
     if meta.center_freq is None:
         warnings.append(
             "centre frequency is unknown; detections carry an offset from the capture "
             "centre but no absolute RF frequency"
         )
-    if iq.size >= LARGE_CAPTURE_SAMPLES:
+    if iq.size >= STREAM_THRESHOLD_SAMPLES:
         warnings.append(
-            f"capture is {iq.size} samples and was analysed whole; overlapped block "
-            "processing for very large files is not wired in yet"
+            f"capture is {iq.size:,} samples and was analysed whole rather than in "
+            "segments, so peak memory scaled with the capture. Call analyse_file, which "
+            "routes a capture this size to the streaming path automatically."
         )
 
     if iq.size < 256:
@@ -557,7 +637,7 @@ def analyse_iq(
         capture=meta,
         noise_floor_dbfs=round(detection.noise.floor_db + dbfs_offset, 2),
         detections=detections,
-        warnings=warnings,
+        warnings=_fold_warnings(warnings, cfg.max_warnings),
         runtime_s=round(time.perf_counter() - started, 3),
     )
     return Analysis(
@@ -565,6 +645,319 @@ def analyse_iq(
         spectrogram=detection.spectrogram,
         noise=detection.noise,
         bursts=bursts,
+    )
+
+
+# --------------------------------------------------------------------------------------
+# Streaming: segmented analysis for captures too large to hold (§2 Stage 2, §9 B)
+# --------------------------------------------------------------------------------------
+
+
+def _overlaps_in_frequency(a: Detection, b: Detection) -> bool:
+    def span(d: Detection) -> tuple[float, float]:
+        half = (d.bandwidth_hz.occupied_99 or 0.0) / 2.0
+        centre = d.center_freq_offset_hz or 0.0
+        return centre - half, centre + half
+
+    a_lo, a_hi = span(a)
+    b_lo, b_hi = span(b)
+    return a_lo <= b_hi and b_lo <= a_hi
+
+
+def _strength(detection: Detection) -> float:
+    """SNR as a sortable number; a burst below the floor ranks last."""
+    return detection.snr_db if isinstance(detection.snr_db, (int, float)) else -999.0
+
+
+def _merge_across_seams(
+    detections: list[Detection], gap_s: float, warnings: list[str]
+) -> list[Detection]:
+    """Stitch detections split by a segment boundary back into one.
+
+    A transmission running across a seam is found twice, once in each segment. Two
+    detections merge when they overlap in frequency and their time spans touch within
+    ``gap_s``.
+
+    The merged detection keeps the **parameters of the stronger contributor** rather than
+    re-measuring, because the samples spanning the seam are no longer in memory by the time
+    this runs -- that is the whole point of streaming. Every merged detection says so in its
+    evidence, so a number an analyst reads is never quietly a partial-burst measurement
+    presented as a whole-burst one.
+    """
+    if not detections:
+        return []
+    ordered = sorted(
+        detections, key=lambda d: (d.time_start_s, d.center_freq_offset_hz or 0.0)
+    )
+    merged: list[Detection] = []
+    n_merged = 0
+
+    for detection in ordered:
+        target = None
+        for candidate in merged:
+            if not _overlaps_in_frequency(candidate, detection):
+                continue
+            if detection.time_start_s - candidate.time_stop_s <= gap_s:
+                target = candidate
+                break
+        if target is None:
+            merged.append(detection)
+            continue
+
+        n_merged += 1
+        keeper = target if _strength(target) >= _strength(detection) else detection
+        start = min(target.time_start_s, detection.time_start_s)
+        stop = max(target.time_stop_s, detection.time_stop_s)
+
+        target.time_start_s = start
+        target.time_stop_s = stop
+        target.duration_s = stop - start
+        if keeper is not target:
+            target.center_freq_hz = keeper.center_freq_hz
+            target.center_freq_offset_hz = keeper.center_freq_offset_hz
+            target.bandwidth_hz = keeper.bandwidth_hz
+            target.snr_db = keeper.snr_db
+            target.power_dbfs = keeper.power_dbfs
+            target.symbol_rate_hz = keeper.symbol_rate_hz
+            target.modulation = keeper.modulation
+            target.extra = dict(keeper.extra)
+        target.extra["crossed_segment_boundary"] = True
+        if target.modulation is not None:
+            note = (
+                "This transmission crossed a processing segment boundary; its parameters "
+                "were measured on the strongest segment, not on the whole burst."
+            )
+            if note not in target.modulation.evidence:
+                target.modulation.evidence = (target.modulation.evidence + [note])[:6]
+
+    if n_merged:
+        warnings.append(
+            f"{n_merged} detection(s) spanning a segment boundary were stitched together; "
+            "their parameters come from the strongest contributing segment"
+        )
+    for index, detection in enumerate(merged, start=1):
+        detection.id = index
+    return merged
+
+
+def _pool_columns(spec: Spectrogram, shift: float, max_columns: int) -> tuple:
+    """Max-pool one segment's spectrogram down to at most ``max_columns`` columns.
+
+    Called **as each segment is produced**, never afterwards. Holding every segment's full
+    spectrogram to stitch at the end is what made the streaming path allocate 8.9 GB on a
+    2 GB capture: 85 segments at 8192 x 4100 float32 is 134 MB each. Pooling on the spot
+    keeps roughly half a megabyte per segment.
+
+    Max rather than mean, for the same reason the PNG writer uses it: a one-bin carrier
+    survives max pooling and vanishes under an average.
+    """
+    n_time = spec.S_db.shape[1]
+    factor = max(1, int(math.ceil(n_time / max(max_columns, 1))))
+    usable = (n_time // factor) * factor
+    if usable == 0:
+        return None
+    block = spec.S_db[:, :usable].reshape(spec.S_db.shape[0], -1, factor).max(axis=2)
+    times = spec.t[:usable:factor][: block.shape[1]] + shift
+    return np.ascontiguousarray(block), np.ascontiguousarray(times), spec.f, spec.nfft, spec.hop
+
+
+def _overview_spectrogram(pooled: list[tuple], fs: float) -> Spectrogram | None:
+    """Join the already-pooled segment slices into one overview for the report.
+
+    Segments overlap by ``SEGMENT_OVERLAP`` so a burst on a seam is seen whole by at least
+    one of them, which means their time ranges also overlap. Concatenating them naively
+    gives a non-monotonic time axis, and the PNG writer maps columns linearly from
+    ``t[0]`` to ``t[-1]`` -- the overlap would be drawn twice and every detection box after
+    the first seam would sit at the wrong x. Each segment therefore contributes only the
+    columns after the previous segment ended.
+    """
+    usable = [p for p in pooled if p is not None]
+    if not usable:
+        return None
+    n_freq = usable[0][0].shape[0]
+    usable = [p for p in usable if p[0].shape[0] == n_freq]  # a short tail may differ
+    if not usable:
+        return None
+
+    blocks: list[np.ndarray] = []
+    times: list[np.ndarray] = []
+    frontier = -np.inf
+    for block, segment_times, _f, _nfft, _hop in usable:
+        keep = segment_times > frontier
+        if not np.any(keep):
+            continue
+        blocks.append(block[:, keep])
+        times.append(segment_times[keep])
+        frontier = float(segment_times[keep][-1])
+    if not blocks:
+        return None
+
+    return Spectrogram(
+        f=usable[0][2],
+        t=np.concatenate(times),
+        S_db=np.concatenate(blocks, axis=1),
+        fs=fs,
+        nfft=usable[0][3],
+        hop=usable[0][4],
+    )
+
+
+def _fold_warnings(warnings: list[str], limit: int) -> list[str]:
+    """Keep the first ``limit`` warnings and summarise the rest by kind.
+
+    A 250-second capture analysed in 85 segments can raise a per-detection warning in
+    every one of them. Truncating silently would hide information; listing all of it makes
+    the report unreadable. Folding keeps every *kind* of warning visible with a count.
+    """
+    if len(warnings) <= limit:
+        return warnings
+    head = warnings[:limit]
+    tail = warnings[limit:]
+    kinds: dict[str, int] = {}
+    for warning in tail:
+        # group by the text after the "detection N: " prefix, which is the kind
+        key = warning.split(": ", 1)[-1] if warning.startswith("detection ") else warning
+        kinds[key] = kinds.get(key, 0) + 1
+    summary = "; ".join(
+        f"{count}x {kind}" for kind, count in sorted(kinds.items(), key=lambda kv: -kv[1])[:5]
+    )
+    head.append(f"and {len(tail)} further warning(s): {summary}")
+    return head
+
+
+def analyse_streaming(
+    path: str | Path,
+    *,
+    fs: float | None = None,
+    fc: float | None = None,
+    dtype: str | None = None,
+    cfg: AnalysisConfig | None = None,
+    on_progress: Callable[[str, float], None] | None = None,
+    segment_samples: int = SEGMENT_SAMPLES,
+    overlap: float = SEGMENT_OVERLAP,
+) -> Analysis:
+    """Analyse a capture in overlapping segments, bounding peak memory (§2 Stage 2, §9 B).
+
+    Each segment is conditioned, detected and measured on its own; detection times are
+    offset onto the capture's own clock, and detections split by a seam are stitched by
+    :func:`_merge_across_seams`. Peak memory is set by ``segment_samples``, not by the file
+    size, which is what lets a 2 GB capture run in well under §9 B's 2 GB ceiling.
+    """
+    from sigscope.io import iter_blocks
+
+    cfg = cfg or AnalysisConfig()
+    path = Path(path)
+    started = time.perf_counter()
+    report_progress = on_progress or (lambda *_: None)
+
+    meta, blocks = iter_blocks(
+        path, fs=fs, fc=fc, dtype=dtype, block_samples=segment_samples, overlap=overlap
+    )
+    step = max(1, int(segment_samples * (1.0 - overlap)))
+    n_segments = max(1, math.ceil(meta.n_samples / step))
+
+    warnings: list[str] = [
+        f"capture is {meta.n_samples:,} samples; analysed in {n_segments} overlapping "
+        f"segments of {segment_samples:,} samples so peak memory stays bounded"
+    ]
+    if meta.frequencies_are_normalised:
+        warnings.append(
+            "sample rate is unknown; every frequency below is a fraction of the sample "
+            "rate, not Hz, and every time is a sample count, not seconds. §3 forbids "
+            "printing a fabricated Hz value, and the same applies to a fabricated second."
+        )
+    if meta.center_freq is None:
+        warnings.append(
+            "centre frequency is unknown; detections carry an offset from the capture "
+            "centre but no absolute RF frequency"
+        )
+
+    classifiers = load_classifiers() if cfg.classify else None
+    if classifiers is not None and not classifiers.any_trained:
+        warnings.append(
+            "no trained classifier checkpoint found, so modulation comes from the §5.4 "
+            "deterministic rules alone; run `sigscope fetch-data` then `sigscope train`"
+        )
+
+    detections: list[Detection] = []
+    pooled: list[tuple] = []
+    floors: list[float] = []
+    columns_per_segment = max(4, 1200 // max(n_segments, 1))
+    next_id = 1
+    hop_seconds = 0.0
+
+    for index, block in enumerate(blocks):
+        offset = index * step
+        report_progress("measuring", min(0.9, 0.05 + 0.85 * index / n_segments))
+        if block.size < 256:
+            continue
+
+        x, cond = condition(block)
+        dbfs_offset = _dbfs_offset(cond.scale)
+        result = detect_bursts(
+            x, meta.sample_rate, replace(cfg.detector, precondition=False)
+        )
+        floors.append(result.noise.floor_db + dbfs_offset)
+        hop_seconds = result.spectrogram.hop / meta.sample_rate
+        shift = offset / meta.sample_rate
+
+        pooled.append(_pool_columns(result.spectrogram, shift, columns_per_segment))
+
+        for burst in result.bursts[: cfg.max_detections]:
+            detection = _measure_burst(
+                burst,
+                next_id,
+                x,
+                meta,
+                result.spectrogram,
+                cfg,
+                dbfs_offset,
+                warnings,
+                classifiers,
+            )
+            detection.time_start_s += shift
+            detection.time_stop_s += shift
+            detection.extra["segment"] = index
+            detections.append(detection)
+            next_id += 1
+
+        del x, result
+
+    report_progress("reporting", 0.92)
+    detections = _merge_across_seams(detections, 3.0 * hop_seconds, warnings)
+    if len(detections) > cfg.max_detections:
+        warnings.append(
+            f"{len(detections)} detections found; reporting the {cfg.max_detections} "
+            "strongest by bandwidth-duration area"
+        )
+        detections.sort(
+            key=lambda d: (d.bandwidth_hz.occupied_99 or 0.0) * d.duration_s, reverse=True
+        )
+        detections = sorted(detections[: cfg.max_detections], key=lambda d: d.time_start_s)
+        for index, detection in enumerate(detections, start=1):
+            detection.id = index
+
+    report = Report(
+        file=file_info(path),
+        capture=meta,
+        noise_floor_dbfs=round(float(np.median(floors)), 2) if floors else None,
+        detections=detections,
+        warnings=_fold_warnings(warnings, cfg.max_warnings),
+        runtime_s=round(time.perf_counter() - started, 3),
+    )
+    return Analysis(
+        report=report,
+        spectrogram=_overview_spectrogram(pooled, meta.sample_rate),
+        noise=None,
+        bursts=[
+            Burst(
+                d.time_start_s,
+                d.time_stop_s,
+                (d.center_freq_offset_hz or 0.0) - (d.bandwidth_hz.occupied_99 or 0.0) / 2,
+                (d.center_freq_offset_hz or 0.0) + (d.bandwidth_hz.occupied_99 or 0.0) / 2,
+            )
+            for d in detections
+        ],
     )
 
 
@@ -585,6 +978,15 @@ def analyse_file(
     """
     path = Path(path)
     started = time.perf_counter()
+
+    # Decide before reading: a capture too large to hold must never be materialised just
+    # to discover that it was too large to hold.
+    estimated = _estimate_sample_count(path)
+    if estimated is not None and estimated >= STREAM_THRESHOLD_SAMPLES:
+        return analyse_streaming(
+            path, fs=fs, fc=fc, dtype=dtype, cfg=cfg, on_progress=on_progress
+        )
+
     iq, meta = read_capture(path, fs=fs, fc=fc, dtype=dtype)
     analysis = analyse_iq(
         iq, meta, info=file_info(path), cfg=cfg, on_progress=on_progress

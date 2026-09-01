@@ -89,33 +89,58 @@
   }
 
   const Plots = {
-    /* I against Q. Four tight clusters is QPSK; a ring is constant-modulus; a smear is
-       noise or a burst that was never a single signal. */
+    /* I against Q, on a SQUARE axis. Four tight clusters is QPSK; a ring is
+       constant-modulus; a smear is noise or a burst that was never one signal. Equal scaling matters here and nowhere else on the
+       page: a constellation stretched to the panel's aspect turns QPSK's four dots into
+       four smears and a constant-modulus ring into an ellipse, which is exactly the
+       reading an analyst uses this plot to make. */
     constellation: function (canvas, data) {
       const p = prepare(canvas);
+      const iExt = extent(data.i), qExt = extent(data.q);
       const lim = Math.max(
-        Math.abs(extent(data.i)[0]), Math.abs(extent(data.i)[1]),
-        Math.abs(extent(data.q)[0]), Math.abs(extent(data.q)[1])
+        Math.abs(iExt[0]), Math.abs(iExt[1]), Math.abs(qExt[0]), Math.abs(qExt[1])
       ) || 1;
-      const box = axes(p.ctx, p.w, p.h, "I", "Q", -lim, lim, -lim, lim);
-      const sx = (box.x1 - box.x0) / (2 * lim);
-      const sy = (box.y1 - box.y0) / (2 * lim);
+
+      const side = Math.min(p.w - PAD.left - PAD.right, p.h - PAD.top - PAD.bottom);
+      const cx = PAD.left + (p.w - PAD.left - PAD.right) / 2;
+      const cy = PAD.top + (p.h - PAD.top - PAD.bottom) / 2;
+      const x0 = cx - side / 2, x1 = cx + side / 2;
+      const y0 = cy - side / 2, y1 = cy + side / 2;
 
       p.ctx.strokeStyle = COLOUR.axis;
+      p.ctx.lineWidth = 1;
+      p.ctx.strokeRect(x0, y0, side, side);
       p.ctx.beginPath();
-      p.ctx.moveTo(box.x0, (box.y0 + box.y1) / 2); p.ctx.lineTo(box.x1, (box.y0 + box.y1) / 2);
-      p.ctx.moveTo((box.x0 + box.x1) / 2, box.y0); p.ctx.lineTo((box.x0 + box.x1) / 2, box.y1);
+      p.ctx.moveTo(x0, cy); p.ctx.lineTo(x1, cy);
+      p.ctx.moveTo(cx, y0); p.ctx.lineTo(cx, y1);
       p.ctx.stroke();
 
+      p.ctx.fillStyle = COLOUR.text;
+      p.ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+      p.ctx.textAlign = "right"; p.ctx.textBaseline = "middle";
+      p.ctx.fillText(fmt(lim), x0 - 6, y0 + 4);
+      p.ctx.fillText(fmt(-lim), x0 - 6, y1 - 4);
+      p.ctx.textAlign = "center"; p.ctx.textBaseline = "top";
+      p.ctx.fillText("I", cx, y1 + 6);
+      p.ctx.save();
+      p.ctx.translate(x0 - 26, cy); p.ctx.rotate(-Math.PI / 2);
+      p.ctx.textAlign = "center"; p.ctx.fillText("Q", 0, 0);
+      p.ctx.restore();
+
+      const scale = side / (2 * lim);
       p.ctx.fillStyle = COLOUR.accent;
-      p.ctx.globalAlpha = 0.55;
+      p.ctx.globalAlpha = data.symbol_sampled ? 0.7 : 0.4;
+      const dot = data.symbol_sampled ? 1.8 : 1.2;
       for (let n = 0; n < data.i.length; n++) {
-        const x = box.x0 + (data.i[n] + lim) * sx;
-        const y = box.y1 - (data.q[n] + lim) * sy;
-        p.ctx.fillRect(x - 0.75, y - 0.75, 1.5, 1.5);
+        const x = cx + data.i[n] * scale;
+        const y = cy - data.q[n] * scale;
+        p.ctx.fillRect(x - dot / 2, y - dot / 2, dot, dot);
       }
       p.ctx.globalAlpha = 1;
-      return data.i.length + " symbols, power-normalised";
+
+      return data.symbol_sampled
+        ? data.i.length + " symbol-rate samples (matched-filtered, timing recovered)"
+        : data.i.length + " waveform samples — no symbol rate, so not symbol-sampled";
     },
 
     spectrum: function (canvas, data) {
