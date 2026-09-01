@@ -33,6 +33,30 @@ class Spectrogram:
     def shape(self) -> tuple[int, int]:
         return self.S_db.shape
 
+    def mean_power_per_bin(self, chunk: int = 512) -> np.ndarray:
+        """Time-averaged **linear** power in each frequency bin, computed once.
+
+        ``10 ** (S_db / 10)`` over a whole spectrogram is the single most expensive thing
+        in the pipeline: on a 10 s / 2 MHz capture ``S_db`` is 8192 x 9766, so the linear
+        copy is 640 MB of float64. §4.7 needs that array for every detection, and
+        recomputing it per burst cost 74 of 105 seconds and most of the peak RSS on a
+        17-detection scene.
+
+        The result depends only on the spectrogram, so it is computed once and memoised,
+        and accumulated over column chunks so the 640 MB temporary is never materialised.
+        """
+        cached = getattr(self, "_mean_power_per_bin", None)
+        if cached is not None:
+            return cached
+        n_freq, n_time = self.S_db.shape
+        total = np.zeros(n_freq, dtype=np.float64)
+        for start in range(0, n_time, chunk):
+            block = self.S_db[:, start : start + chunk]
+            total += np.power(10.0, block.astype(np.float64) / 10.0).sum(axis=1)
+        result = total / max(n_time, 1)
+        object.__setattr__(self, "_mean_power_per_bin", result)
+        return result
+
 
 def choose_nfft(n_samples: int, *, target_cols: int = 2000, lo: int = 256, hi: int = 8192) -> int:
     """Power-of-two ``nfft`` aiming for ``target_cols`` STFT columns (hop = nfft/4)."""

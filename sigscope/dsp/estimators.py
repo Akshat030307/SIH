@@ -651,9 +651,6 @@ def estimate_snr(
     if not np.any(cols):
         cols = np.ones(t.size, dtype=bool)
 
-    p_lin = np.power(10.0, spec.S_db / 10.0)
-    per_bin_mean = p_lin[:, cols].mean(axis=1)
-
     guard = cfg.snr_guard_frac * max(burst.bandwidth, 0.0)
     outside = (f < burst.f_lo - guard) | (f > burst.f_hi + guard)
     if np.count_nonzero(outside) < 8:
@@ -662,11 +659,22 @@ def estimate_snr(
         note = ["no out-of-box bins available to measure the noise floor"]
         return SnrResult(Estimate(None, 0.0, method, note), None, None)
 
-    # noise measured over the whole capture in the out-of-box bins
-    noise_per_bin = float(np.median(p_lin[outside].mean(axis=1)))
+    # Noise is a whole-capture, whole-spectrum quantity, so it comes from the memoised
+    # per-bin mean rather than a fresh linear copy of the spectrogram per detection.
+    mean_power = spec.mean_power_per_bin()
+    noise_per_bin = float(np.median(mean_power[outside]))
+
+    # Signal power is restricted to this burst's columns, so only the in-box rows are
+    # converted -- a few bins wide instead of the whole 8192-bin array.
+    # np.ix_ selects rows and columns in one pass. `S_db[in_box][:, cols]` first
+    # materialises every in-box row across *all* columns -- 48 MB for a wide detection --
+    # and then throws most of it away.
+    in_box_block = spec.S_db[np.ix_(in_box, cols)].astype(np.float64)
+    per_bin_in_box = np.power(10.0, in_box_block / 10.0).mean(axis=1)
+
     n_bins = int(np.count_nonzero(in_box))
     p_noise = noise_per_bin * n_bins
-    p_total = float(np.sum(per_bin_mean[in_box]))
+    p_total = float(np.sum(per_bin_in_box))
     p_signal = p_total - p_noise
 
     power_dbfs = 10.0 * math.log10(p_total) if p_total > 0 else None

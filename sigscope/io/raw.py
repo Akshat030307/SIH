@@ -100,23 +100,35 @@ def iter_raw_blocks(
 ) -> tuple[str, int, Iterator[np.ndarray]]:
     """Return ``(dtype, n_samples, block_iterator)``; blocks are overlapping ``complex64``.
 
-    Uses ``np.memmap`` so the full complex array is never materialised (CLAUDE.md §9 B,
-    "2 GB file processed in blocks with peak RSS under 2 GB").
+    Each block is **read** from the file rather than sliced out of a mapping (CLAUDE.md
+    §9 B, "2 GB file processed in blocks with peak RSS under 2 GB").
+
+    An earlier version mapped the file with ``np.memmap`` and copied a window per block.
+    That keeps the heap bounded, but on Windows every page the mapping touches joins the
+    process working set and stays there: walking a 2 GB capture pushed measured RSS to
+    1.98 GB against a 2 GB ceiling, with barely 1 GB of it actually on the heap. Explicit
+    reads give the same bounded heap with no file-backed residency to accumulate, so the
+    figure §9 B measures is the figure the pipeline actually needs.
     """
     path = Path(path)
     name, _conf, _scores, _notes = _resolve_dtype(path, dtype)
-    mm = np.memmap(path, dtype=numpy_dtype(name), mode="r")
-    n_samples = int(mm.size // 2)
+    element = np.dtype(numpy_dtype(name))
+    total_elements = path.stat().st_size // element.itemsize
+    n_samples = int(total_elements // 2)
     if n_samples < 1:
         raise CaptureError(f"{path}: fewer than one complete IQ sample")
     step = max(1, int(block_samples * (1.0 - overlap)))
 
     def _blocks() -> Iterator[np.ndarray]:
-        for start in range(0, n_samples, step):
-            stop = min(start + block_samples, n_samples)
-            seg = np.array(mm[2 * start : 2 * stop])  # copy just this window
-            yield decode_interleaved(seg, name)
-            if stop == n_samples:
-                break
+        with open(path, "rb") as handle:
+            for start in range(0, n_samples, step):
+                stop = min(start + block_samples, n_samples)
+                handle.seek(2 * start * element.itemsize)
+                seg = np.fromfile(handle, dtype=element, count=2 * (stop - start))
+                if seg.size == 0:
+                    break
+                yield decode_interleaved(seg, name)
+                if stop == n_samples:
+                    break
 
     return name, n_samples, _blocks()

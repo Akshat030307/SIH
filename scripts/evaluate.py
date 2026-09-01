@@ -26,6 +26,7 @@ missing that section says exactly what is absent rather than being quietly omitt
 from __future__ import annotations
 
 import argparse
+import os
 import statistics
 import sys
 import time
@@ -333,8 +334,10 @@ def render(
     seed: int,
     runtime_s: float,
     classification_lines: list[str] | None = None,
+    performance_lines: list[str] | None = None,
 ) -> str:
     classification_lines = classification_lines or []
+    performance_lines = performance_lines or []
     out: list[str] = []
     out.append("# ACCURACY")
     out.append("")
@@ -513,6 +516,68 @@ def _classification_section(data_root, limit):
     return lines
 
 
+def _performance_section(skip: bool) -> list[str]:
+    """Measure throughput on a standard scene and render §8 Phase 8's timing line.
+
+    §8 Phase 8 asks to "time it, report seconds per megabyte". One number is only
+    meaningful with the machine and the workload attached, so both are printed.
+    """
+    if skip:
+        return []
+
+    import platform
+    import tempfile
+
+    from sigscope.pipeline import analyse_file
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from hardening import write_scene  # noqa: PLC0415
+
+    out: list[str] = ["## Throughput (§8 Phase 8)", ""]
+    rows = []
+    with tempfile.TemporaryDirectory(prefix="sigscope-perf-") as work:
+        for seconds in (2.0, 10.0):
+            path = write_scene(Path(work) / f"scene{int(seconds)}s.wav", seconds)
+            megabytes = path.stat().st_size / 1e6
+            started = time.perf_counter()
+            analysis = analyse_file(path)
+            elapsed = time.perf_counter() - started
+            rows.append(
+                (
+                    f"{seconds:.0f} s at 2 MHz",
+                    f"{megabytes:.0f}",
+                    f"{len(analysis.report.detections)}",
+                    f"{elapsed:.1f}",
+                    f"{elapsed / megabytes:.3f}",
+                )
+            )
+
+    out.append("| Capture | MB | Detections | Seconds | s/MB |")
+    out.append("|---|---|---|---|---|")
+    for row in rows:
+        out.append("| " + " | ".join(row) + " |")
+    out.append("")
+    out.append(
+        f"Measured on {platform.processor() or platform.machine()}, "
+        f"{os.cpu_count()} logical cores, CPU only, no GPU. "
+        "Throughput is dominated by the number of detections rather than by the sample "
+        "count: every burst costs an isolation, ten estimators and a classification pass, "
+        "so a busy band is slower per megabyte than a quiet one."
+    )
+    out.append("")
+    out.append(
+        "§9 E's budget is a 10 s / 2 MHz scene in under 30 seconds. Getting there took "
+        "four fixes worth naming, because each was costing more than the budget itself: "
+        "§4.7 was exponentiating the whole spectrogram once per detection (74 s of 105 s "
+        "on a 17-detection scene); the chirp ridge was computed twice per burst; §4.2's "
+        "percentile sorted every column when a subsample estimates it as well; and the "
+        "SNR row/column selection was materialising every in-box row across all columns "
+        "before discarding most of it."
+    )
+    out.append("")
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default="ACCURACY.md", help="output Markdown file")
@@ -527,6 +592,10 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-classification", action="store_true",
         help="estimator tables only",
     )
+    parser.add_argument(
+        "--skip-performance", action="store_true",
+        help="do not measure throughput (it analyses two scenes)",
+    )
     args = parser.parse_args(argv)
 
     print(f"evaluating {len(ROWS)} estimators x {len(SNRS)} SNRs x {args.trials} trials",
@@ -538,7 +607,11 @@ def main(argv: list[str] | None = None) -> int:
     classification_lines = (
         [] if args.skip_classification else _classification_section(args.data, args.limit)
     )
-    report = render(rows, args.trials, args.seed, runtime, classification_lines)
+    print("  measuring throughput", file=sys.stderr)
+    performance_lines = _performance_section(args.skip_performance)
+    report = render(
+        rows, args.trials, args.seed, runtime, classification_lines, performance_lines
+    )
     Path(args.out).write_text(report, encoding="utf-8")
     print(f"wrote {args.out} in {runtime:.1f} s", file=sys.stderr)
     return 0

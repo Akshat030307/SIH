@@ -1,6 +1,11 @@
+# setuptools rather than hatchling, deliberately. §9 E asks a fresh clone to reach a
+# working demo on a clean machine, and §10 runs that demo with the network off. hatchling
+# is not part of any standard Python install, so `pip install -e .` on an air-gapped
+# laptop fails at the build-backend step before it ever looks at our code. setuptools
+# ships with pip, so the same command works offline.
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "sigscope"
@@ -41,8 +46,8 @@ dev = [
 [project.scripts]
 sigscope = "sigscope.cli:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["sigscope"]
+[tool.setuptools.packages.find]
+include = ["sigscope*"]
 
 [tool.ruff]
 line-length = 100

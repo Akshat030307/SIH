@@ -33,7 +33,7 @@
 
   function hz(value, normalised) {
     if (value === null || value === undefined) return null;
-    if (normalised) return (value >= 0 ? "+" : "") + value.toPrecision(4) + " ×fs";
+    if (normalised) return (value >= 0 ? "+" : "") + Number(value.toPrecision(5)) + " ×fs";
     const a = Math.abs(value);
     if (a >= 1e9) return (value / 1e9).toFixed(4) + " GHz";
     if (a >= 1e6) return (value / 1e6).toFixed(4) + " MHz";
@@ -41,8 +41,12 @@
     return value.toFixed(1) + " Hz";
   }
 
-  function seconds(value) {
+  /* Seconds, or a sample count when the capture has no known sample rate. With fs
+     unknown the pipeline works at fs = 1.0, so every "second" is really a sample index --
+     printing it as a time would be the §3 fabricated-value mistake in a different unit. */
+  function seconds(value, normalised) {
     if (value === null || value === undefined) return null;
+    if (normalised) return Math.round(value).toLocaleString() + " samples";
     if (value < 1e-3) return (value * 1e6).toFixed(1) + " µs";
     if (value < 1) return (value * 1e3).toFixed(2) + " ms";
     return value.toFixed(3) + " s";
@@ -184,7 +188,7 @@
       ["Sample rate", normalised ? "unknown" : Math.round(capture.sample_rate_hz).toLocaleString() + " Hz"],
       ["Centre", capture.center_freq_hz === null ? "unknown" : hz(capture.center_freq_hz, false)],
       ["Centre from", capture.center_freq_source || "—"],
-      ["Duration", seconds(capture.duration_s)],
+      ["Duration", seconds(capture.duration_s, normalised)],
       ["Noise floor", report.noise_floor_dbfs === null ? "—" : report.noise_floor_dbfs.toFixed(1) + " dBFS"],
       ["Detections", String(report.detections.length)]
     ];
@@ -285,7 +289,7 @@
     for (let k = 0; k <= 4; k++) {
       const value = spec.t_lo + (k / 4) * (spec.t_hi - spec.t_lo);
       const label = document.createElement("span");
-      label.textContent = seconds(value) || "";
+      label.textContent = seconds(value, spec.normalised_frequency) || "";
       xAxis.appendChild(label);
     }
   }
@@ -441,8 +445,8 @@
         null],
       ["SNR", db(detection.snr_db), null],
       ["Power", db(detection.power_dbfs) ? db(detection.power_dbfs) + "FS" : null, null],
-      ["Start", seconds(detection.time_start_s), null],
-      ["Duration", seconds(detection.duration_s), null],
+      ["Start", seconds(detection.time_start_s, normalised), null],
+      ["Duration", seconds(detection.duration_s, normalised), null],
       ["Symbol rate",
         rate && rate.value !== null ? Math.round(rate.value).toLocaleString() + " Bd" : null,
         rate && rate.value !== null ? "confidence " + rate.confidence.toFixed(2) : null],

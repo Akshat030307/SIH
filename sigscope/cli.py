@@ -95,12 +95,23 @@ def _print_summary(report) -> None:
     normalised = capture.frequencies_are_normalised
     fs_text = "unknown" if normalised else f"{capture.sample_rate:,.0f} Hz"
     fc_text = "unknown" if capture.center_freq is None else f"{capture.center_freq:,.0f} Hz"
-    unit = "x fs" if normalised else "Hz"
+    time_unit = "samples" if normalised else "s"
+
+    def freq(value: float | None) -> str:
+        """Hz, or a fraction of the sample rate. A normalised value is a small fraction,
+        so it needs significant figures rather than a thousands-separated integer -- an
+        occupied bandwidth of 0.0166 x fs printed as "0 x fs" is worse than useless."""
+        if value is None:
+            return "-"
+        return f"{value:+.5g} x fs" if normalised else f"{value:,.0f} Hz"
 
     print(f"{report.file.name}  ({report.file.bytes:,} bytes, {capture.source_format})")
+    duration = (
+        f"{capture.duration_s:,.0f} samples" if normalised else f"{capture.duration_s:.3f} s"
+    )
     print(
         f"  sample rate {fs_text}   centre {fc_text}"
-        f"   duration {capture.duration_s:.3f} s   dtype {capture.dtype_guessed}"
+        f"   duration {duration}   dtype {capture.dtype_guessed}"
         f" ({capture.dtype_confidence:.0%})"
     )
     floor = "unknown" if report.noise_floor_dbfs is None else f"{report.noise_floor_dbfs:.1f} dBFS"
@@ -110,20 +121,18 @@ def _print_summary(report) -> None:
     if report.detections:
         print()
         print(
-            f"  {'#':>3}  {'start':>9}  {'duration':>9}  {'centre':>16}  "
-            f"{'OBW99':>12}  {'SNR':>8}  {'symbol rate':>14}  modulation"
+            f"  {'#':>3}  {'start (' + time_unit + ')':>9}  "
+            f"{'duration':>9}  {'centre':>16}  "
+            f"{'OBW99':>12}  {'SNR':>8}  {'symbol rate':>20}  modulation"
         )
         for d in report.detections:
-            centre = (
-                f"{d.center_freq_hz:,.0f} Hz"
-                if d.center_freq_hz is not None
-                else (f"{d.center_freq_offset_hz:+,.1f} {unit}"
-                      if d.center_freq_offset_hz is not None else "unknown")
-            )
-            obw = (
-                f"{d.bandwidth_hz.occupied_99:,.0f} {unit}"
-                if d.bandwidth_hz.occupied_99 is not None else "-"
-            )
+            if d.center_freq_hz is not None:
+                centre = f"{d.center_freq_hz:,.0f} Hz"
+            elif d.center_freq_offset_hz is not None:
+                centre = freq(d.center_freq_offset_hz)
+            else:
+                centre = "unknown"
+            obw = freq(d.bandwidth_hz.occupied_99).lstrip("+")
             if isinstance(d.snr_db, (int, float)):
                 snr = f"{d.snr_db:.1f} dB"
             elif isinstance(d.snr_db, str):
@@ -131,13 +140,26 @@ def _print_summary(report) -> None:
             else:
                 snr = "-"
             if d.symbol_rate_hz is not None and d.symbol_rate_hz.value is not None:
-                rate = f"{d.symbol_rate_hz.value:,.0f} Bd ({d.symbol_rate_hz.confidence:.2f})"
+                # "Bd" is symbols per *second*; with the sample rate unknown the only
+                # honest unit is symbols per sample, i.e. a fraction of fs
+                value = (
+                    f"{d.symbol_rate_hz.value:.5g} x fs"
+                    if normalised
+                    else f"{d.symbol_rate_hz.value:,.0f} Bd"
+                )
+                rate = f"{value} ({d.symbol_rate_hz.confidence:.2f})"
             else:
                 rate = "unknown"
             label = d.modulation.label if d.modulation else "-"
+            if normalised:
+                start = f"{d.time_start_s:>9,.0f}"
+                length = f"{d.duration_s:>9,.0f}"
+            else:
+                start = f"{d.time_start_s:>8.3f}s"
+                length = f"{d.duration_s:>8.3f}s"
             print(
-                f"  {d.id:>3}  {d.time_start_s:>8.3f}s  {d.duration_s:>8.3f}s  "
-                f"{centre:>16}  {obw:>12}  {snr:>8}  {rate:>14}  {label}"
+                f"  {d.id:>3}  {start}  {length}  "
+                f"{centre:>16}  {obw:>12}  {snr:>8}  {rate:>20}  {label}"
             )
 
     if report.warnings:

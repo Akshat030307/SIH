@@ -8,8 +8,8 @@ from sigscope.cli import build_parser, main
 
 ALL_COMMANDS = ["analyse", "batch", "fetch-data", "make-scenes", "train", "evaluate", "serve"]
 # still stubbed: fetch-data landed in Phase 1, evaluate in Phase 4, analyse and batch in
-# Phase 5, train in Phase 6
-STUBBED = ["make-scenes", "serve"]
+# Phase 5, train in Phase 6, serve in Phase 7
+STUBBED = ["make-scenes"]
 # subcommands that take a required positional argument
 POSITIONAL = {"analyse": ["dummy"], "batch": ["dummy"]}
 
@@ -53,6 +53,22 @@ def test_batch_reports_a_missing_folder_cleanly(capsys):
     rc = main(["batch", "no_such_folder"])
     assert rc == 1
     assert "not a directory" in capsys.readouterr().out
+
+
+def test_serve_is_wired_but_never_started_by_the_suite():
+    """``sigscope serve`` dispatches to the §7 app factory.
+
+    Deliberately does not call it: running ``main(["serve"])`` binds a real port, which a
+    test must never do -- an earlier revision of this file did exactly that and the suite
+    started a server on :8000. The app itself is exercised through
+    ``fastapi.testclient`` in tests/test_api.py, which binds nothing.
+    """
+    from sigscope.cli import _cmd_serve
+
+    args = build_parser().parse_args(["serve"])
+    assert args.func is _cmd_serve
+    assert args.port == 8000
+    assert args.host == "127.0.0.1", "§7 is a local-only tool with no auth"
 
 
 def test_train_reports_a_missing_dataset_cleanly(capsys):

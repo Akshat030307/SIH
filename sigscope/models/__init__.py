@@ -94,6 +94,7 @@ def classify(
     fs_raw: float | None = None,
     box_f_lo: float | None = None,
     box_f_hi: float | None = None,
+    chirp: Any = None,
     extra: dict[str, Any] | None = None,
     symbol_rate: float | None = None,
     bandwidth_hz: float | None = None,
@@ -115,6 +116,7 @@ def classify(
         fs_raw=fs_raw,
         box_f_lo=box_f_lo,
         box_f_hi=box_f_hi,
+        chirp=chirp,
     )
     feature_prediction = classifiers.feature.predict(y, sps=sps)
     cnn_prediction = classifiers.cnn.predict(y)

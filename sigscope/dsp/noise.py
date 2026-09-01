@@ -36,15 +36,28 @@ class NoiseEstimate:
 
 
 def estimate_noise(
-    S_db: np.ndarray, *, percentile: float = 25.0, bin_percentile: float = 25.0
+    S_db: np.ndarray,
+    *,
+    percentile: float = 25.0,
+    bin_percentile: float = 25.0,
+    max_columns: int = 4096,
 ) -> NoiseEstimate:
     """Per-bin percentile over time -> robust scalar floor + MAD spread (CLAUDE.md §4.2).
 
     ``percentile`` is taken over time within each bin; ``bin_percentile`` is then taken
     across bins for the scalar floor. Set ``bin_percentile=50`` for §4.2's literal median --
     see the module docstring for why 25 is the default.
+
+    ``max_columns`` subsamples the time axis before taking the percentile. A percentile is
+    a distribution statistic and 4096 evenly-spaced columns estimate it as well as 9766 do,
+    while the sort underneath is the single largest allocation in the pipeline -- on a
+    10 s / 2 MHz capture the full-width version copied 320 MB and cost 5 s of a 30 s budget.
     """
-    per_bin = np.percentile(S_db, percentile, axis=1).astype(np.float64)
+    columns = S_db
+    if max_columns and S_db.shape[1] > max_columns:
+        step = int(np.ceil(S_db.shape[1] / max_columns))
+        columns = S_db[:, ::step]
+    per_bin = np.percentile(columns, percentile, axis=1).astype(np.float64)
     floor = float(np.percentile(per_bin, bin_percentile))
     mad = float(np.median(np.abs(per_bin - floor)))
     return NoiseEstimate(per_bin_db=per_bin, floor_db=floor, sigma_db=1.4826 * mad)

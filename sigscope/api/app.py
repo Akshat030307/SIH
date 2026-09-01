@@ -28,11 +28,11 @@ from fastapi.staticfiles import StaticFiles
 
 from sigscope import __version__ as SIGSCOPE_VERSION
 from sigscope.api.audio import demodulate
-from sigscope.api.jobs import Job, JobState, JobStore
+from sigscope.api.jobs import Job, JobError, JobState, JobStore
 from sigscope.batch import CSV_COLUMNS, find_captures, run_batch
 from sigscope.dsp.estimators import isolate_burst
 from sigscope.io import CaptureError, read_capture
-from sigscope.pipeline import AnalysisConfig, analyse_iq, file_info
+from sigscope.pipeline import AnalysisConfig, analyse_file
 from sigscope.report import build_sigmf_meta, render_spectrogram_png
 from sigscope.report.html_report import _max_pool
 from sigscope.types import Burst
@@ -209,17 +209,22 @@ def create_app(*, store: JobStore | None = None, web_root: Path | None = None) -
                 )
             store.advance(job, "reading")
             try:
-                iq, meta = read_capture(destination, fs=fs, fc=fc, dtype=dtype)
+                # analyse_file, not read_capture + analyse_iq: it sizes the capture first
+                # and routes anything large to the segmented streaming path. §7 accepts
+                # uploads up to 2 GB, and reading one of those whole would undo the
+                # streaming the upload itself was careful to do.
+                analysis = analyse_file(
+                    destination,
+                    fs=fs,
+                    fc=fc,
+                    dtype=dtype,
+                    cfg=cfg,
+                    on_progress=lambda stage, fraction: store.advance(job, stage, fraction),
+                )
             except CaptureError as exc:
-                # a bad file is an expected outcome, and the message names the problem
-                raise ValueError(str(exc).replace(str(destination), name)) from exc
-            analysis = analyse_iq(
-                iq,
-                meta,
-                info=file_info(destination),
-                cfg=cfg,
-                on_progress=lambda stage, fraction: store.advance(job, stage, fraction),
-            )
+                # a bad file is an expected outcome, and io already names the problem;
+                # swap the temp path for the name the user uploaded
+                raise JobError(str(exc).replace(str(destination), name)) from exc
             analysis.report.file.name = name
             return {"analysis": analysis, "source": destination}
 
@@ -349,8 +354,15 @@ def create_app(*, store: JobStore | None = None, web_root: Path | None = None) -
         factor_t = max(1, int(np.ceil(s_db.shape[1] / max(max_width, 16))))
         pooled = _max_pool(s_db, factor_f, factor_t)
         finite = pooled[np.isfinite(pooled)]
-        vmin = float(np.percentile(finite, 5.0)) if finite.size else -120.0
-        vmax = float(np.percentile(finite, 99.5)) if finite.size else 0.0
+        # Anchor the low end near the noise floor rather than at the 5th percentile. Most
+        # cells in a typical capture *are* noise, so a 5th-percentile floor spends the
+        # bottom half of viridis rendering the noise in bright purple and leaves the
+        # signals with what is left. Putting the floor at the 60th percentile pushes the
+        # noise to the dark end where §7 wants it and gives the signals the colour range.
+        vmin = float(np.percentile(finite, 60.0)) if finite.size else -120.0
+        vmax = float(np.percentile(finite, 99.8)) if finite.size else 0.0
+        if vmax <= vmin:
+            vmin, vmax = float(finite.min()), float(finite.max()) if finite.size else (0.0, 1.0)
         return JSONResponse(
             {
                 # one decimal is below the visual resolution of any colormap and roughly
@@ -452,26 +464,48 @@ def create_app(*, store: JobStore | None = None, web_root: Path | None = None) -
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         y = isolated.y
-        step = max(1, y.size // max(max_samples, 64))
-        y = y[::step][:max_samples]
-        power = float(np.mean(np.abs(y) ** 2)) or 1.0
-        y = y / np.sqrt(power)
-        f_inst = np.angle(y[1:] * np.conj(y[:-1])) * isolated.fs_b / (2 * np.pi)
 
-        spectrum = np.fft.fftshift(np.abs(np.fft.fft(y)) ** 2)
+        # The spectrum and the instantaneous frequency want the waveform as it is, so they
+        # are computed on a plainly decimated copy.
+        step = max(1, y.size // max(max_samples, 64))
+        wave = y[::step][:max_samples]
+        wave = wave / (np.sqrt(float(np.mean(np.abs(wave) ** 2))) or 1.0)
+        f_inst = np.angle(wave[1:] * np.conj(wave[:-1])) * isolated.fs_b / (2 * np.pi)
+        spectrum = np.fft.fftshift(np.abs(np.fft.fft(wave)) ** 2)
         spectrum_db = 10.0 * np.log10(spectrum + 1e-12)
-        freqs = np.fft.fftshift(np.fft.fftfreq(y.size, 1.0 / isolated.fs_b))
+        freqs = np.fft.fftshift(np.fft.fftfreq(wave.size, 1.0 / isolated.fs_b))
+
+        # The constellation does not. A constellation is a property of the symbol-rate
+        # samples, so decimating the pulse-shaped waveform by an arbitrary step smears
+        # every symbol across all phases and QPSK comes out as a disc. Matched-filtering
+        # and sampling at the recovered timing phase is what makes §8 Phase 1's "QPSK must
+        # show four dots" true on screen -- the same correction §5.2's cumulants needed.
+        constellation = wave
+        symbol_sampled = False
+        rate = detection.symbol_rate_hz
+        if rate is not None and rate.value:
+            sps = isolated.fs_b / float(rate.value)
+            if 2.0 <= sps <= 64.0:
+                from sigscope.features.cumulants import symbol_sample
+
+                stream, _ = symbol_sample(y, int(round(sps)))
+                if stream.size >= 16:
+                    stream = stream[:max_samples]
+                    power = float(np.mean(np.abs(stream) ** 2)) or 1.0
+                    constellation = stream / np.sqrt(power)
+                    symbol_sampled = True
 
         return JSONResponse(
             {
-                "i": np.round(y.real, 4).tolist(),
-                "q": np.round(y.imag, 4).tolist(),
+                "i": np.round(constellation.real, 4).tolist(),
+                "q": np.round(constellation.imag, 4).tolist(),
+                "symbol_sampled": symbol_sampled,
                 "f_inst": np.round(f_inst, 2).tolist(),
                 "spectrum_db": np.round(spectrum_db, 2).tolist(),
                 "spectrum_hz": np.round(freqs, 2).tolist(),
                 "fs_b": isolated.fs_b,
                 "decimation": isolated.decimation,
-                "n_samples": int(y.size),
+                "n_samples": int(wave.size),
             }
         )
 

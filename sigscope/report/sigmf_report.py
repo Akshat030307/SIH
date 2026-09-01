@@ -29,8 +29,12 @@ _CAPTURES = "captures"
 _ANNOTATIONS = "annotations"
 _SIGMF_VERSION = "1.0.0"
 
-# our own namespace for the measurements SigMF core has no field for
+# our own namespace for the measurements SigMF core has no field for. SigMF requires any
+# such namespace to be declared in `core:extensions`; without the declaration the reference
+# library warns today and will raise a ValidationError in a future release, which would
+# quietly break §9 E's "SigMF output loads in the sigmf library".
 _NS = "sigscope"
+_NS_VERSION = "1.0.0"
 
 
 def _dtype_to_sigmf(dtype: str, *, normalised: bool) -> str:
@@ -103,6 +107,9 @@ def build_sigmf_meta(report: Report) -> dict[str, Any]:
             capture.dtype_guessed, normalised=capture.frequencies_are_normalised
         ),
         "core:version": _SIGMF_VERSION,
+        "core:extensions": [
+            {"name": _NS, "version": _NS_VERSION, "optional": True}
+        ],
         "core:num_channels": 1,
         "core:recorder": "sigscope",
         "core:description": (
