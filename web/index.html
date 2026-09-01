@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SIGSCOPE</title>
+<!--
+  CLAUDE.md §7. Nothing here is fetched from a network: no CDN, no font service, no
+  analytics. Every asset is a sibling file. That is what makes §2's offline rule a
+  property of the checkout rather than of a setting, and it is what §9 E means by
+  "Everything works identically with wifi disabled".
+-->
+<link rel="stylesheet" href="css/app.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark">SIGSCOPE</span>
+    <span class="sub">spectrum monitoring</span>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab" data-view="drop" role="tab" aria-selected="true">Drop file</button>
+    <button class="tab" data-view="analysis" role="tab" aria-selected="false">Analysis</button>
+    <button class="tab" data-view="batch" role="tab" aria-selected="false">Batch</button>
+  </nav>
+  <div class="status" id="health" title="local API status">checking…</div>
+</header>
+
+<!-- ══════════════════════════════════════════════════ DROP ══════════════ -->
+<section class="view" id="view-drop">
+  <div class="drop-wrap">
+    <div class="dropzone" id="dropzone" tabindex="0" role="button"
+         aria-label="Drop a capture file here, or press Enter to browse">
+      <div class="dz-inner">
+        <div class="dz-title">Drop a capture here</div>
+        <div class="dz-hint">.iq · .wav · .cf32 · .cs16 · .sigmf-data — or click to browse</div>
+        <input type="file" id="file-input" hidden>
+      </div>
+    </div>
+
+    <div class="drop-side">
+      <div class="panel">
+        <h2>Optional</h2>
+        <p class="note">Leave blank and we will work it out from the file.</p>
+        <label class="field">
+          <span>Sample rate (Hz)</span>
+          <input type="text" id="in-fs" inputmode="decimal" placeholder="e.g. 2e6">
+        </label>
+        <label class="field">
+          <span>Centre frequency (Hz)</span>
+          <input type="text" id="in-fc" inputmode="decimal" placeholder="e.g. 100e6">
+        </label>
+        <label class="field">
+          <span>Detection threshold (dB)</span>
+          <input type="text" id="in-threshold" inputmode="decimal" placeholder="derived">
+        </label>
+      </div>
+
+      <div class="panel">
+        <h2>Filename patterns we can read</h2>
+        <ul class="patterns">
+          <li><code>SDRSharp_YYYYMMDD_HHMMSSZ_&lt;freq&gt;Hz_IQ.wav</code></li>
+          <li><code>HDSDR_YYYYMMDD_HHMMSSZ_&lt;khz&gt;kHz_RF.wav</code></li>
+          <li><code>*_&lt;rate&gt;sps_*</code></li>
+          <li><code>*_fc&lt;freq&gt;_*</code></li>
+          <li><code>.cs8</code> / <code>.cs16</code> / <code>.cf32</code> extensions</li>
+        </ul>
+        <p class="note">
+          A stereo WAV is read as I/Q. A mono WAV is treated as real audio. A headerless
+          file has its sample format guessed from the histogram, and if no sample rate can
+          be found anywhere, frequencies are reported as a fraction of the sample rate
+          rather than as invented Hz.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- what we detected about the file, shown before the analysis finishes -->
+  <div class="panel job-panel" id="job-panel" hidden>
+    <h2>Reading</h2>
+    <div class="job-line">
+      <span class="job-name mono" id="job-name">—</span>
+      <span class="job-stage" id="job-stage">queued</span>
+    </div>
+    <div class="progress"><div class="progress-bar" id="progress-bar"></div></div>
+    <dl class="early" id="early-meta"></dl>
+  </div>
+
+  <div class="panel error-panel" id="drop-error" hidden></div>
+</section>
+
+<!-- ══════════════════════════════════════════════ ANALYSIS ══════════════ -->
+<section class="view" id="view-analysis" hidden>
+  <div class="analysis-grid">
+
+    <!-- the signature element: spectrogram, two-thirds of the screen (§7) -->
+    <div class="panel spec-panel">
+      <div class="spec-head">
+        <h2>Spectrogram</h2>
+        <div class="spec-meta mono" id="spec-meta"></div>
+      </div>
+      <div class="spec-stage" id="spec-stage">
+        <div class="axis-y" id="axis-y"></div>
+        <div class="spec-canvas-wrap" id="spec-wrap">
+          <canvas id="spec-canvas"></canvas>
+          <div class="boxes" id="boxes"></div>
+        </div>
+      </div>
+      <div class="axis-x" id="axis-x"></div>
+    </div>
+
+    <!-- detection list -->
+    <div class="panel list-panel">
+      <h2>Detections <span class="count mono" id="det-count"></span></h2>
+      <ul class="det-list" id="det-list"></ul>
+    </div>
+
+    <!-- selected detection: parameters, then evidence -->
+    <div class="panel detail-panel" id="detail-panel">
+      <div class="detail-empty" id="detail-empty">
+        Select a detection to read its parameters.
+      </div>
+
+      <div id="detail-body" hidden>
+        <div class="detail-head">
+          <h2>Selected <span class="sel-id mono" id="sel-id"></span></h2>
+          <div class="detail-actions">
+            <button class="btn" id="btn-audio" title="Demodulated audio, where demodulable">
+              Listen
+            </button>
+            <a class="btn" id="btn-sigmf" href="#" download>SigMF</a>
+            <a class="btn" id="btn-json" href="#" target="_blank" rel="noopener">JSON</a>
+          </div>
+        </div>
+
+        <div class="params" id="params"></div>
+
+        <div class="evidence-block">
+          <h3>Why we think so</h3>
+          <ul class="evidence" id="evidence"></ul>
+        </div>
+
+        <div class="plots">
+          <div class="plot-tabs" role="tablist">
+            <button class="plot-tab is-on" data-plot="constellation" role="tab">constellation</button>
+            <button class="plot-tab" data-plot="spectrum" role="tab">spectrum</button>
+            <button class="plot-tab" data-plot="finst" role="tab">inst. frequency</button>
+          </div>
+          <canvas id="plot-canvas"></canvas>
+          <div class="plot-note mono" id="plot-note"></div>
+        </div>
+
+        <audio id="audio-player" controls hidden></audio>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel warn-panel" id="warn-panel" hidden>
+    <h2>Warnings</h2>
+    <ul id="warn-list"></ul>
+  </div>
+</section>
+
+<!-- ═════════════════════════════════════════════════ BATCH ══════════════ -->
+<section class="view" id="view-batch" hidden>
+  <div class="panel">
+    <h2>Batch</h2>
+    <p class="note">
+      Analyse every capture in a folder on this machine. One row per file; click a row to
+      open its report.
+    </p>
+    <div class="batch-controls">
+      <label class="field grow">
+        <span>Folder path</span>
+        <input type="text" id="batch-path" placeholder="/path/to/captures">
+      </label>
+      <button class="btn primary" id="btn-batch">Run</button>
+    </div>
+    <div class="progress" id="batch-progress-wrap" hidden>
+      <div class="progress-bar" id="batch-progress"></div>
+    </div>
+    <div class="batch-status" id="batch-status"></div>
+  </div>
+
+  <div class="panel" id="batch-results" hidden>
+    <div class="detail-head">
+      <h2>Results <span class="count mono" id="batch-count"></span></h2>
+      <div class="detail-actions">
+        <label class="field inline">
+          <span>Filter</span>
+          <input type="text" id="batch-filter" placeholder="modulation or filename">
+        </label>
+        <a class="btn" id="btn-csv" href="#" download>CSV</a>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table class="batch-table" id="batch-table"></table>
+    </div>
+  </div>
+</section>
+
+<script src="js/viridis.js"></script>
+<script src="js/api.js"></script>
+<script src="js/plots.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,367 @@
+/* SIGSCOPE dashboard (CLAUDE.md §7 "Design direction").
+ *
+ * The subject is a spectrum monitoring instrument used by an analyst who stares at it for
+ * hours, and §7 is explicit that this "points somewhere specific, and it is not a startup
+ * landing page". What that means concretely, and what this file implements:
+ *
+ *   - Dark, because a spectrogram is a light-on-dark object and a white page around it
+ *     destroys the contrast the analyst needs. #0d1117 / #161b22 / #2d333b / #c9d1d9.
+ *   - ONE accent, #4dd0c4, used only for the selected detection. Colour never decorates
+ *     here: it means "selected" or "warning", nothing else. There are no coloured
+ *     headings, no gradient buttons, no brand flourishes anywhere in this file.
+ *   - Numbers are the content of this product, so measured values get tabular figures and
+ *     are set LARGER than the labels beside them. That inversion is deliberate and is the
+ *     single most visible design decision on the page.
+ *   - The spectrogram takes two-thirds of the screen and never shrinks below it.
+ *   - Left-aligned throughout. No centred text anywhere except the empty drop state.
+ *   - No motion except the selection highlight and the progress bar. An instrument that
+ *     animates for fun is an instrument that annoys you by hour three.
+ *
+ * Fonts: §7 asks for IBM Plex Sans and IBM Plex Mono vendored as woff2. They are not
+ * present in this checkout -- see web/fonts/README.md. The @font-face rules below are
+ * live, so dropping the files in makes them take effect with no code change; until then
+ * the stacks fall through to a system humanist sans and a monospace with tabular figures,
+ * which preserves the typographic intent if not the exact typeface.
+ */
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("../fonts/IBMPlexSans-Regular.woff2") format("woff2");
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("../fonts/IBMPlexSans-SemiBold.woff2") format("woff2");
+  font-weight: 600; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../fonts/IBMPlexMono-Regular.woff2") format("woff2");
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../fonts/IBMPlexMono-Medium.woff2") format("woff2");
+  font-weight: 500; font-style: normal; font-display: swap;
+}
+
+:root {
+  --bg:      #0d1117;
+  --panel:   #161b22;
+  --rule:    #2d333b;
+  --text:    #c9d1d9;
+  --muted:   #8b949e;
+  --accent:  #4dd0c4;   /* selection only */
+  --warn:    #d29922;   /* warnings only */
+
+  --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+
+  --gap: 16px;
+  --radius: 6px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── typography ────────────────────────────────────────────────────────── */
+
+h2 {
+  font-size: 11px; font-weight: 600; margin: 0 0 12px;
+  text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted);
+}
+h3 {
+  font-size: 11px; font-weight: 600; margin: 0 0 8px;
+  text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted);
+}
+.mono, code {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+code { font-size: 12px; color: var(--muted); }
+.note { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+
+/* ── chrome ────────────────────────────────────────────────────────────── */
+
+.topbar {
+  display: flex; align-items: center; gap: 24px;
+  padding: 0 20px; height: 52px; flex: 0 0 52px;
+  border-bottom: 1px solid var(--rule); background: var(--panel);
+}
+.brand { display: flex; align-items: baseline; gap: 10px; }
+.mark { font-weight: 600; letter-spacing: 0.14em; font-size: 14px; }
+.sub { color: var(--muted); font-size: 12px; }
+
+.tabs { display: flex; gap: 2px; margin-left: 8px; }
+.tab {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); font: inherit; font-size: 13px;
+  padding: 16px 12px 14px; cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+
+.status { margin-left: auto; color: var(--muted); font-size: 12px; font-family: var(--mono); }
+.status.bad { color: var(--warn); }
+
+.view {
+  flex: 1 1 auto; min-height: 0;
+  padding: var(--gap); overflow: auto;
+}
+
+.panel {
+  background: var(--panel); border: 1px solid var(--rule);
+  border-radius: var(--radius); padding: 16px;
+}
+
+/* ── drop screen ───────────────────────────────────────────────────────── */
+
+.drop-wrap {
+  display: grid; grid-template-columns: 1fr 380px; gap: var(--gap);
+  align-items: stretch;
+}
+.dropzone {
+  border: 1px dashed var(--rule); border-radius: var(--radius);
+  background: var(--panel); min-height: 420px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; outline: none;
+}
+.dropzone:hover, .dropzone:focus-visible { border-color: var(--muted); }
+.dropzone.is-over { border-color: var(--accent); border-style: solid; }
+.dz-inner { text-align: center; }
+.dz-title { font-size: 18px; margin-bottom: 6px; }
+.dz-hint { color: var(--muted); font-size: 13px; }
+
+.drop-side { display: flex; flex-direction: column; gap: var(--gap); }
+
+.field { display: block; margin-bottom: 12px; }
+.field > span {
+  display: block; color: var(--muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 4px;
+}
+.field input {
+  width: 100%; background: var(--bg); color: var(--text);
+  border: 1px solid var(--rule); border-radius: 4px;
+  padding: 7px 9px; font-family: var(--mono); font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.field input:focus { outline: none; border-color: var(--accent); }
+.field.inline { display: flex; align-items: center; gap: 8px; margin: 0; }
+.field.inline > span { margin: 0; }
+.field.grow { flex: 1 1 auto; margin: 0; }
+
+.patterns { margin: 0; padding-left: 18px; color: var(--muted); }
+.patterns li { margin: 4px 0; }
+
+.job-panel { margin-top: var(--gap); }
+.job-line { display: flex; justify-content: space-between; align-items: baseline; }
+.job-name { font-size: 14px; }
+.job-stage { color: var(--muted); font-size: 12px; text-transform: uppercase;
+             letter-spacing: 0.07em; }
+
+/* the progress bar is one of only two things on this page allowed to move (§7) */
+.progress {
+  height: 2px; background: var(--rule); border-radius: 1px;
+  margin: 10px 0 14px; overflow: hidden;
+}
+.progress-bar {
+  height: 100%; width: 0; background: var(--accent);
+  transition: width 220ms linear;
+}
+
+.early { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+         gap: 12px 24px; margin: 0; }
+.early div span {
+  display: block; color: var(--muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.07em;
+}
+.early div strong {
+  font-family: var(--mono); font-weight: 500; font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.error-panel { margin-top: var(--gap); border-color: var(--warn); color: var(--warn); }
+.error-panel strong { display: block; margin-bottom: 6px; }
+.error-panel .fix { color: var(--muted); }
+
+/* ── analysis screen ───────────────────────────────────────────────────── */
+
+/* §7: "The spectrogram takes two-thirds of the screen and never shrinks below it." */
+.analysis-grid {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  grid-template-rows: minmax(0, 2fr) minmax(0, 1fr);
+  grid-template-areas:
+    "spec  list"
+    "detail detail";
+  gap: var(--gap);
+  height: 100%;
+  min-height: 0;
+}
+.spec-panel   { grid-area: spec;   display: flex; flex-direction: column; min-height: 0; }
+.list-panel   { grid-area: list;   display: flex; flex-direction: column; min-height: 0; }
+.detail-panel { grid-area: detail; overflow: auto; min-height: 0; }
+
+.spec-head { display: flex; justify-content: space-between; align-items: baseline; }
+.spec-meta { color: var(--muted); font-size: 12px; }
+
+.spec-stage { flex: 1 1 auto; display: flex; gap: 8px; min-height: 0; }
+.axis-y {
+  flex: 0 0 74px; display: flex; flex-direction: column; justify-content: space-between;
+  color: var(--muted); font-size: 11px; font-family: var(--mono); text-align: right;
+  padding: 0 2px 0 0;
+}
+.spec-canvas-wrap {
+  position: relative; flex: 1 1 auto; min-width: 0; min-height: 0;
+  border: 1px solid var(--rule); border-radius: 4px; overflow: hidden;
+  background: #000;
+}
+#spec-canvas { display: block; width: 100%; height: 100%; }
+.boxes { position: absolute; inset: 0; }
+
+/* §7: detection boxes are hairline #8b949e when idle; the accent means selected */
+.box {
+  position: absolute; border: 1px solid var(--muted);
+  cursor: pointer; background: transparent;
+}
+.box:hover { border-color: var(--text); }
+.box.is-selected {
+  border-color: var(--accent); border-width: 1px;
+  box-shadow: 0 0 0 1px var(--accent);
+  transition: border-color 120ms linear, box-shadow 120ms linear;
+}
+.box-label {
+  position: absolute; top: -17px; left: -1px;
+  font-family: var(--mono); font-size: 10px; color: var(--muted);
+  background: var(--bg); padding: 0 3px; white-space: nowrap;
+}
+.box.is-selected .box-label { color: var(--accent); }
+
+.axis-x {
+  display: flex; justify-content: space-between;
+  color: var(--muted); font-size: 11px; font-family: var(--mono);
+  padding: 6px 0 0 82px;
+}
+
+.det-list { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1 1 auto; }
+.det-item {
+  border: 1px solid var(--rule); border-radius: 4px;
+  padding: 9px 10px; margin-bottom: 8px; cursor: pointer;
+}
+.det-item:hover { border-color: var(--muted); }
+.det-item.is-selected {
+  border-color: var(--accent);
+  transition: border-color 120ms linear;
+}
+.det-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.det-id { font-family: var(--mono); font-size: 13px; color: var(--accent); font-weight: 500; }
+.det-label { font-size: 12px; color: var(--text); }
+.det-label.is-unknown { color: var(--muted); }
+.det-nums {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: 15px; margin-top: 3px;
+}
+.det-sub { color: var(--muted); font-size: 11px; font-family: var(--mono); }
+
+.count { color: var(--muted); font-size: 12px; }
+
+.detail-empty { color: var(--muted); padding: 8px 0; }
+.detail-head { display: flex; justify-content: space-between; align-items: center;
+               gap: 12px; margin-bottom: 14px; }
+.sel-id { color: var(--accent); font-size: 13px; }
+.detail-actions { display: flex; gap: 8px; align-items: center; }
+
+.btn {
+  background: var(--bg); color: var(--text); border: 1px solid var(--rule);
+  border-radius: 4px; padding: 6px 12px; font: inherit; font-size: 12px;
+  cursor: pointer; text-decoration: none; display: inline-block;
+}
+.btn:hover { border-color: var(--muted); }
+.btn:disabled { color: var(--muted); cursor: not-allowed; }
+.btn.primary { border-color: var(--accent); color: var(--accent); }
+
+/* §7: "Numbers ... get tabular figures and are set larger than the labels beside them." */
+.params {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px 28px; margin-bottom: 20px;
+}
+.param span {
+  display: block; color: var(--muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.07em;
+}
+.param strong {
+  font-family: var(--mono); font-weight: 500; font-size: 17px;
+  font-variant-numeric: tabular-nums; color: var(--text);
+}
+.param .unmeasured { color: var(--muted); font-size: 15px; }
+.param em { font-style: normal; color: var(--muted); font-size: 12px;
+            font-family: var(--mono); margin-left: 6px; }
+
+.evidence-block { margin-bottom: 20px; }
+.evidence { margin: 0; padding-left: 18px; }
+.evidence li { margin: 5px 0; }
+
+.plots { border-top: 1px solid var(--rule); padding-top: 14px; }
+.plot-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.plot-tab {
+  background: var(--bg); border: 1px solid var(--rule); border-radius: 4px;
+  color: var(--muted); font: inherit; font-size: 12px; padding: 5px 11px; cursor: pointer;
+}
+.plot-tab:hover { color: var(--text); }
+.plot-tab.is-on { color: var(--accent); border-color: var(--accent); }
+#plot-canvas {
+  display: block; width: 100%; height: 240px;
+  border: 1px solid var(--rule); border-radius: 4px; background: var(--bg);
+}
+.plot-note { color: var(--muted); font-size: 11px; margin-top: 6px; }
+
+#audio-player { width: 100%; margin-top: 14px; }
+
+.warn-panel { margin-top: var(--gap); border-color: var(--rule); }
+.warn-panel h2 { color: var(--warn); }
+.warn-panel ul { margin: 0; padding-left: 18px; color: var(--muted); }
+.warn-panel li { margin: 4px 0; }
+
+/* ── batch screen ──────────────────────────────────────────────────────── */
+
+.batch-controls { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 12px; }
+.batch-status { color: var(--muted); font-size: 13px; font-family: var(--mono); }
+#view-batch .panel + .panel { margin-top: var(--gap); }
+
+.table-scroll { overflow: auto; max-height: 60vh; }
+.batch-table { width: 100%; border-collapse: collapse; }
+.batch-table th {
+  position: sticky; top: 0; background: var(--panel); text-align: left;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--muted); padding: 8px 12px 8px 0; border-bottom: 1px solid var(--rule);
+  white-space: nowrap; cursor: pointer;
+}
+.batch-table th:hover { color: var(--text); }
+.batch-table td {
+  padding: 8px 12px 8px 0; border-bottom: 1px solid var(--rule); white-space: nowrap;
+}
+.batch-table td.num {
+  font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 14px;
+}
+.batch-table tr.is-error td { color: var(--warn); }
+
+/* ── empty and error states: say what happened AND what to do (§7) ─────── */
+
+.empty-state { color: var(--muted); padding: 10px 0; }
+.empty-state .what { color: var(--text); display: block; margin-bottom: 4px; }

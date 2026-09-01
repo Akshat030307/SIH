@@ -7,8 +7,9 @@ import pytest
 from sigscope.cli import build_parser, main
 
 ALL_COMMANDS = ["analyse", "batch", "fetch-data", "make-scenes", "train", "evaluate", "serve"]
-# still stubbed in Phase 0 (fetch-data landed in Phase 1)
-STUBBED = ["analyse", "batch", "make-scenes", "train", "evaluate", "serve"]
+# still stubbed: fetch-data landed in Phase 1, evaluate in Phase 4, analyse and batch in
+# Phase 5, train in Phase 6
+STUBBED = ["make-scenes", "serve"]
 # subcommands that take a required positional argument
 POSITIONAL = {"analyse": ["dummy"], "batch": ["dummy"]}
 
@@ -30,6 +31,53 @@ def test_subcommand_not_implemented(cmd, capsys):
     rc = main([cmd, *POSITIONAL.get(cmd, [])])
     assert rc == 1
     assert "not implemented" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("cmd", ["analyse", "batch"])
+def test_pipeline_commands_are_wired(cmd):
+    """Phase 5: ``analyse`` and ``batch`` dispatch to the pipeline, not the stub."""
+    from sigscope.cli import _cmd_analyse, _cmd_batch
+
+    args = build_parser().parse_args([cmd, "somewhere"])
+    assert args.func is {"analyse": _cmd_analyse, "batch": _cmd_batch}[cmd]
+
+
+def test_analyse_reports_a_missing_file_cleanly(capsys):
+    """§9 B: a bad input gives a message naming the problem, never a traceback."""
+    rc = main(["analyse", "no_such_capture.iq"])
+    assert rc == 1
+    assert "no such file" in capsys.readouterr().out.lower()
+
+
+def test_batch_reports_a_missing_folder_cleanly(capsys):
+    rc = main(["batch", "no_such_folder"])
+    assert rc == 1
+    assert "not a directory" in capsys.readouterr().out
+
+
+def test_train_reports_a_missing_dataset_cleanly(capsys):
+    """§6.1: the cache is built by ``fetch-data``. Without it, ``train`` says so and names
+    the command that fixes it -- it does not traceback and does not train on nothing."""
+    rc = main(["train", "--data", "no_such_cache"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "no RadioML cache" in out
+    assert "fetch-data" in out
+
+
+def test_evaluate_is_wired_to_the_harness():
+    """``sigscope evaluate`` dispatches to the §9 A harness, not the stub (§8 Phase 4).
+
+    Deliberately does not *run* it: ``main(["evaluate"])`` with default arguments would
+    overwrite the repository's own ACCURACY.md as a side effect of running the test suite.
+    The harness is exercised end to end in ``tests/test_evaluate.py``, into ``tmp_path``.
+    """
+    from sigscope.cli import _cmd_evaluate
+
+    args = build_parser().parse_args(["evaluate"])
+    assert args.func is _cmd_evaluate
+    assert args.out == "ACCURACY.md"
+    assert args.trials == 8
 
 
 def test_fetch_data_needs_src(capsys):
